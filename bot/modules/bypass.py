@@ -219,7 +219,7 @@ async def bypass(_, message):
 
     api_url = (
         Config.POSTER_API_URL
-        or "https://thezakeapi.vercel.app"
+        or "https://thezakeapi-git-beta-ftsatyam.vercel.app"
     ).rstrip("/")
     token = (Config.POSTER_API_TOKEN or "thezake").strip()
 
