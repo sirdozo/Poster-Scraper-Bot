@@ -8,27 +8,22 @@ class Config:
     BOT_TOKEN = ""
     USER_SESSION_STRING = ""
     TG_PROXY = None
-
     OWNER_ID = 0
     AUTHORIZED_CHATS = ""
     SUDO_USERS = ""
     PUBLIC_MODE = True
     VERIFY_TIMEOUT = 0
-
     DATABASE_URL = ""
-
     BASE_URL = ""
     BASE_URL_PORT = 80
     PROTECTED_API = ""
-
     CMD_SUFFIX = ""
     DEFAULT_LANG = "en"
     SET_COMMANDS = True
     TIMEZONE = "Asia/Kolkata"
-
     TMDB_ACCESS_TOKEN = ""
     IMDB_TEMPLATE = ""
-    POSTER_API_URL = "https://thezakeapi.vercel.app"
+    POSTER_API_URL = ""
     POSTER_API_TOKEN = "thezake"
 
     AUTHOR_NAME = "TheZake"
