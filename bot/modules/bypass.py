@@ -2,17 +2,43 @@ from html import escape
 from io import BytesIO
 from json import dumps
 from re import match as re_match
+from re import search as re_search
+from urllib.parse import urlparse
 
-MAX_MSG = 3800        # Telegram limit 4096, buffer ke saath
-MAX_DEPTH = 3         # isse gehra nested compact JSON me dikhega
+from niquests import AsyncSession
+from pyrogram.enums import ButtonStyle
+
+from .. import LOGGER
+from ..core.config_manager import Config
+from ..helper.ext_utils.bot_utils import new_task
+from ..helper.telegram_helper.button_build import ButtonMaker
+from ..helper.telegram_helper.message_utils import send_message
+
+MAX_MSG = 3800
+MAX_DEPTH = 3
 MAX_LIST_ITEMS = 8
 MAX_LINKS = 15
 MAX_VALUE_LEN = 300
 SKIP_KEYS = {"url", "headers", "credits", "cookies", "cookie"}
 LINK_KEYS = (
-    "direct_link", "direct_url", "download_url", "download_link",
-    "download", "dl", "link", "file_url", "stream_url", "video_url",
+    "direct_link",
+    "direct_url",
+    "download_url",
+    "download_link",
+    "download",
+    "dl",
+    "link",
+    "file_url",
+    "stream_url",
+    "video_url",
 )
+
+
+def extract_url_from_text(text: str) -> str | None:
+    if not text:
+        return None
+    match = re_search(r"https?://\S+", text)
+    return match.group(0) if match else None
 
 
 def is_url(v) -> bool:
@@ -31,7 +57,7 @@ def label_of(key) -> str:
     return escape(str(key).replace("_", " ").replace("-", " ").strip().title())
 
 
-def short(text: str, limit: int = MAX_VALUE_LEN) -> str:
+def short(text, limit: int = MAX_VALUE_LEN) -> str:
     text = str(text)
     return text if len(text) <= limit else text[:limit] + "…"
 
@@ -47,7 +73,6 @@ def scalar_text(v) -> str:
 
 
 def walk_links(node, label="Link", found=None):
-    """Poore tree me se saare (label, url) nikalta h."""
     if found is None:
         found = []
     if isinstance(node, dict):
@@ -66,8 +91,9 @@ def walk_links(node, label="Link", found=None):
 def pick_primary_links(data: dict) -> list[tuple[str, str]]:
     all_links = walk_links(data)
     prioritized = [
-        (lbl, u) for lbl, u in all_links
-        if any(lbl.lower().startswith(k) or k in lbl.lower() for k in LINK_KEYS)
+        (lbl, u)
+        for lbl, u in all_links
+        if any(k in lbl.lower() for k in LINK_KEYS)
     ]
     chosen = prioritized or all_links
     seen, unique = set(), []
@@ -131,7 +157,6 @@ def render(node, depth: int, shown: set) -> list[str]:
 
 
 def format_bypass_result(data, url: str) -> tuple[str, bool]:
-    """Returns (html_text, truncated). Kisi bhi JSON shape pe kaam karta h."""
     if not isinstance(data, dict):
         data = {"result": data}
 
@@ -165,3 +190,116 @@ def format_bypass_result(data, url: str) -> tuple[str, bool]:
 
     lines = head + (["", *body] if body else []) + footer
     return "\n".join(lines), truncated
+
+
+@new_task
+async def bypass(_, message):
+    url = None
+
+    if len(message.command) >= 2:
+        url = message.command[1].strip()
+    elif message.reply_to_message:
+        replied = message.reply_to_message
+        url = extract_url_from_text(replied.text or replied.caption)
+
+    if not url:
+        return await send_message(
+            message,
+            "<b>Usage:</b> <code>/bypass https://example.com/file</code>\n\n"
+            "Send a supported DDL URL after <code>/bypass</code> or <code>/b</code>, "
+            "or reply to a message containing a link.",
+        )
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return await send_message(
+            message,
+            "<b>Invalid URL.</b> Send a complete http(s) link.",
+        )
+
+    api_url = (
+        Config.POSTER_API_URL
+        or "https://thezakeapi.vercel.app"
+    ).rstrip("/")
+    token = (Config.POSTER_API_TOKEN or "thezake").strip()
+
+    if not token:
+        LOGGER.error("POSTER_API_TOKEN is not configured")
+        return await send_message(
+            message,
+            "<b>Bypass service is not configured.</b> "
+            "Please contact the bot owner.",
+        )
+
+    waiting = await send_message(
+        message,
+        f"<i>Resolving direct link for:</i>\n<code>{escape(url)}</code>",
+    )
+
+    raw_data = None
+    truncated = False
+
+    try:
+        async with AsyncSession(timeout=30) as client:
+            response = await client.get(
+                f"{api_url}/bypass",
+                params={"url": url},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        if response.status_code == 401:
+            text = (
+                "<b>Error:</b> <code>Poster API authentication failed. "
+                "Check POSTER_API_TOKEN.</code>"
+            )
+        elif response.status_code == 404:
+            text = "<b>Error:</b> <code>Unsupported DDL host.</code>"
+        elif response.status_code >= 400:
+            text = f"<b>Error:</b> <code>Poster API error {response.status_code}</code>"
+        else:
+            raw_data = response.json()
+            text, truncated = format_bypass_result(raw_data, url)
+
+    except ValueError as error:
+        LOGGER.error("Bypass API invalid JSON: %s", error)
+        text = "<b>Error:</b> <code>API ne invalid response diya.</code>"
+    except Exception:
+        LOGGER.exception("Unexpected /bypass command failure")
+        text = "<b>Error:</b> <code>Could not resolve the direct link right now.</code>"
+
+    buttons = ButtonMaker()
+    buttons.url_button("Developer", "https://t.me/TheZake", style=ButtonStyle.PRIMARY)
+    buttons.url_button(
+        "⭐ Source Code",
+        "https://github.com/ImKrishana/Poster-Scraper-Bot",
+        style=ButtonStyle.SUCCESS,
+    )
+
+    sent = None
+    if waiting:
+        try:
+            sent = await waiting.edit(
+                text=text,
+                reply_markup=buttons.build_menu(2),
+            )
+        except Exception:
+            sent = None
+
+    if sent is None:
+        sent = await send_message(
+            message,
+            text,
+            reply_markup=buttons.build_menu(2),
+        )
+
+    if truncated and raw_data is not None:
+        try:
+            doc = BytesIO(
+                dumps(raw_data, indent=2, ensure_ascii=False, default=str).encode()
+            )
+            doc.name = "bypass_response.json"
+            await message.reply_document(document=doc, caption="Full API response")
+        except Exception:
+            LOGGER.exception("Failed to send full response file")
+
+    return sent
